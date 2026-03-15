@@ -1,37 +1,28 @@
 import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
 app = Client("forwarder_bot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN)
 
-# DB Setup
-db_client = AsyncIOMotorClient(Config.MONGO_URL)
-db = db_client.forward_bot
-collection = db.settings
-
-# Global dictionary to store temporary data for batch
 batch_data = {}
 
 def get_id(text):
-    if "t.me/c/" in text or "t.me/" in text:
+    if "t.me/c/" in text:
         return int(text.split('/')[-1])
-    try: return int(text)
+    try:
+        # Link se ID nikalne ka desi jugad agar link poora ho
+        if "/c/" in text:
+            return int(text.split('/')[-2])
+        return int(text)
     except: return None
-
-@app.on_message(filters.command("start") & filters.user(Config.OWNER_ID))
-async def start_cmd(client, message):
-    await message.reply_text("👋 **Bhai, Forwarder Pro ready hai!**\n\nCommands:\n1️⃣ `/batch` - Purane videos bhejni ke liye (Step-by-step)\n2️⃣ `/add` - Naye videos auto-forward ke liye\n3️⃣ `/cancel` - Kisi bhi waqt process rokne ke liye")
-
-# --- Interactive Batch Logic ---
 
 @app.on_message(filters.command("batch") & filters.user(Config.OWNER_ID))
 async def start_batch(client, message):
     batch_data[message.from_user.id] = {"step": 1}
-    await message.reply_text("📥 **Step 1:**\nJis channel se video uthani hai (Source), uski **ID** ya uske kisi message ka **Link** bhejo.")
+    await message.reply_text("📥 **Step 1:** Source Channel ki ID ya link bhejo.")
 
-@app.on_message(filters.user(Config.OWNER_ID) & filters.text & ~filters.command(["start", "batch", "add", "cancel", "list"]))
+@app.on_message(filters.user(Config.OWNER_ID) & filters.text & ~filters.command(["start", "batch", "cancel"]))
 async def handle_steps(client, message):
     user_id = message.from_user.id
     if user_id not in batch_data: return
@@ -39,69 +30,44 @@ async def handle_steps(client, message):
     step = batch_data[user_id].get("step")
 
     if step == 1:
-        # Source ID lena
-        source = get_id(message.text)
-        if not source: return await message.reply_text("❌ Galat ID/Link! Phir se bhejo.")
-        batch_data[user_id]["source"] = source
+        batch_data[user_id]["source"] = get_id(message.text)
         batch_data[user_id]["step"] = 2
-        await message.reply_text("📤 **Step 2:**\nAb jis channel mein video bhejni hai (Destination), uski **ID** bhejo.")
-
+        await message.reply_text("📤 **Step 2:** Destination Channel ID bhejo.")
     elif step == 2:
-        # Destination ID lena
-        dest = get_id(message.text)
-        if not dest: return await message.reply_text("❌ Galat ID! Phir se bhejo.")
-        batch_data[user_id]["dest"] = dest
+        batch_data[user_id]["dest"] = get_id(message.text)
         batch_data[user_id]["step"] = 3
-        await message.reply_text("🔢 **Step 3:**\nKahan se shuru karna hai? **(Start Message Link/ID)** bhejo.")
-
+        await message.reply_text("🔢 **Step 3:** Start Message ID/Link?")
     elif step == 3:
-        # Start ID lena
-        start = get_id(message.text)
-        batch_data[user_id]["start"] = start
+        batch_data[user_id]["start"] = get_id(message.text)
         batch_data[user_id]["step"] = 4
-        await message.reply_text("🏁 **Step 4:**\nKahan tak forward karna hai? **(End Message Link/ID)** bhejo.")
-
+        await message.reply_text("🏁 **Step 4:** End Message ID/Link?")
     elif step == 4:
-        # End ID aur Final Forwarding
         end = get_id(message.text)
-        source = batch_data[user_id]["source"]
-        dest = batch_data[user_id]["dest"]
-        start = batch_data[user_id]["start"]
+        data = batch_data[user_id]
+        start = data["start"]
+        source = data["source"]
+        dest = data["dest"]
         
-        await message.reply_text(f"✅ **Sab tayyar hai!**\nSource: `{source}`\nDest: `{dest}`\nRange: `{start}` to `{end}`\n\n**Forwarding shuru kar raha hoon...**")
-        
-        count = 0
+        del batch_data[user_id]
         status = await message.reply_text("⏳ Processing...")
         
-        # Data delete kar do batch shuru hone se pehle
-        del batch_data[user_id]
-
+        count = 0
         for msg_id in range(start, end + 1):
             try:
-                msg = await client.get_messages(source, msg_id)
-                if msg and not msg.empty:
-                    await msg.copy(chat_id=dest)
-                    count += 1
-                    if count % 10 == 0:
-                        await status.edit(f"🚀 `{count}` messages bhej diye hain...")
-                    await asyncio.sleep(2)
-            except Exception: continue
+                # copy_message use karenge direct, ye zyada powerful hai
+                await client.copy_message(
+                    chat_id=dest,
+                    from_chat_id=source,
+                    message_id=msg_id
+                )
+                count += 1
+                if count % 5 == 0:
+                    await status.edit(f"🚀 `{count}` bhej diye...")
+                await asyncio.sleep(1.5)
+            except Exception as e:
+                print(f"Skip {msg_id}: {e}")
+                continue
         
-        await status.edit(f"🏁 **Mission Successful!**\nTotal `{count}` videos forward ho gayi hain.")
-
-@app.on_message(filters.command("cancel") & filters.user(Config.OWNER_ID))
-async def cancel_batch(client, message):
-    if message.from_user.id in batch_data:
-        del batch_data[message.from_user.id]
-        await message.reply_text("❌ Process cancel kar diya gaya hai.")
-
-# --- Live Forwarding (As it is) ---
-@app.on_message(filters.chat() & ~filters.command(["start", "batch", "add", "cancel", "list"]))
-async def forwarder(client, message):
-    data = await collection.find_one({"source": message.chat.id})
-    if data:
-        try: await message.copy(chat_id=data["dest"])
-        except: pass
+        await status.edit(f"✅ Kaam khatam! Total `{count}` videos bheji gayi.")
 
 app.run()
-    
