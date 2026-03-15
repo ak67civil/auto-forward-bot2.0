@@ -1,99 +1,107 @@
 import asyncio
 from pyrogram import Client, filters
+from pyrogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorClient
 from config import Config
 
-# Database Setup
+app = Client("forwarder_bot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN)
+
+# DB Setup
 db_client = AsyncIOMotorClient(Config.MONGO_URL)
 db = db_client.forward_bot
 collection = db.settings
 
-app = Client(
-    "forwarder_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN
-)
+# Global dictionary to store temporary data for batch
+batch_data = {}
 
-# 1. Function: Link se Message ID nikalne ke liye
 def get_id(text):
     if "t.me/c/" in text or "t.me/" in text:
         return int(text.split('/')[-1])
-    try:
-        return int(text)
-    except:
-        return None
+    try: return int(text)
+    except: return None
 
-# 2. Command: /start (Bot Help Menu)
 @app.on_message(filters.command("start") & filters.user(Config.OWNER_ID))
 async def start_cmd(client, message):
-    help_text = (
-        "👋 **Bhai, Tera Forwarder Bot Online Hai!**\n\n"
-        "🛠 **Meri Commands:**\n"
-        "▶️ `/add -100Source -100Dest` : Live forwarding set karein.\n"
-        "▶️ `/batch [Source] [Dest] [Start] [End]` : Purani range copy karein.\n"
-        "▶️ `/list` : Dekhein kaunse channels linked hain.\n\n"
-        "📌 **Note:** Bot dono channels mein Admin hona chahiye!"
-    )
-    await message.reply_text(help_text)
+    await message.reply_text("👋 **Bhai, Forwarder Pro ready hai!**\n\nCommands:\n1️⃣ `/batch` - Purane videos bhejni ke liye (Step-by-step)\n2️⃣ `/add` - Naye videos auto-forward ke liye\n3️⃣ `/cancel` - Kisi bhi waqt process rokne ke liye")
 
-# 3. Command: /batch (Tera Main Request: Range 200-400 ke liye)
+# --- Interactive Batch Logic ---
+
 @app.on_message(filters.command("batch") & filters.user(Config.OWNER_ID))
-async def batch_forward(client, message):
-    try:
-        args = message.text.split(" ")
-        if len(args) < 5:
-            return await message.reply_text("❌ **Sahi Format:**\n`/batch [SourceID] [DestID] [StartID/Link] [EndID/Link]`")
-        
-        source, dest = int(args[1]), int(args[2])
-        start_id, end_id = get_id(args[3]), get_id(args[4])
+async def start_batch(client, message):
+    batch_data[message.from_user.id] = {"step": 1}
+    await message.reply_text("📥 **Step 1:**\nJis channel se video uthani hai (Source), uski **ID** ya uske kisi message ka **Link** bhejo.")
 
-        status_msg = await message.reply_text(f"⏳ **Batch Processing Start...**\n`{start_id}` se `{end_id}` tak copy ho raha hai.")
+@app.on_message(filters.user(Config.OWNER_ID) & filters.text & ~filters.command(["start", "batch", "add", "cancel", "list"]))
+async def handle_steps(client, message):
+    user_id = message.from_user.id
+    if user_id not in batch_data: return
+
+    step = batch_data[user_id].get("step")
+
+    if step == 1:
+        # Source ID lena
+        source = get_id(message.text)
+        if not source: return await message.reply_text("❌ Galat ID/Link! Phir se bhejo.")
+        batch_data[user_id]["source"] = source
+        batch_data[user_id]["step"] = 2
+        await message.reply_text("📤 **Step 2:**\nAb jis channel mein video bhejni hai (Destination), uski **ID** bhejo.")
+
+    elif step == 2:
+        # Destination ID lena
+        dest = get_id(message.text)
+        if not dest: return await message.reply_text("❌ Galat ID! Phir se bhejo.")
+        batch_data[user_id]["dest"] = dest
+        batch_data[user_id]["step"] = 3
+        await message.reply_text("🔢 **Step 3:**\nKahan se shuru karna hai? **(Start Message Link/ID)** bhejo.")
+
+    elif step == 3:
+        # Start ID lena
+        start = get_id(message.text)
+        batch_data[user_id]["start"] = start
+        batch_data[user_id]["step"] = 4
+        await message.reply_text("🏁 **Step 4:**\nKahan tak forward karna hai? **(End Message Link/ID)** bhejo.")
+
+    elif step == 4:
+        # End ID aur Final Forwarding
+        end = get_id(message.text)
+        source = batch_data[user_id]["source"]
+        dest = batch_data[user_id]["dest"]
+        start = batch_data[user_id]["start"]
+        
+        await message.reply_text(f"✅ **Sab tayyar hai!**\nSource: `{source}`\nDest: `{dest}`\nRange: `{start}` to `{end}`\n\n**Forwarding shuru kar raha hoon...**")
         
         count = 0
-        for msg_id in range(start_id, end_id + 1):
-            try:
-                await client.copy_message(chat_id=dest, from_chat_id=source, message_id=msg_id)
-                count += 1
-                if count % 10 == 0:
-                    await status_msg.edit(f"⏳ **Processing...**\n`{count}` messages copy ho gaye.")
-                await asyncio.sleep(2) # Flood wait se bachne ke liye gap
-            except Exception:
-                continue
+        status = await message.reply_text("⏳ Processing...")
         
-        await status_msg.edit(f"✅ **Batch Complete!**\nTotal `{count}` messages forward hue.")
-    except Exception as e:
-        await message.reply_text(f"❌ Error: `{e}`")
+        # Data delete kar do batch shuru hone se pehle
+        del batch_data[user_id]
 
-# 4. Command: /add (Naye messages ke liye)
-@app.on_message(filters.command("add") & filters.user(Config.OWNER_ID))
-async def add_link(client, message):
-    try:
-        args = message.text.split(" ")
-        source, dest = int(args[1]), int(args[2])
-        await collection.update_one({"source": source}, {"$set": {"dest": dest}}, upsert=True)
-        await message.reply_text("✅ **Linked!** Ab naye messages apne aap forward honge.")
-    except:
-        await message.reply_text("❌ `/add -100SourceID -100DestID` use karein.")
+        for msg_id in range(start, end + 1):
+            try:
+                msg = await client.get_messages(source, msg_id)
+                if msg and not msg.empty:
+                    await msg.copy(chat_id=dest)
+                    count += 1
+                    if count % 10 == 0:
+                        await status.edit(f"🚀 `{count}` messages bhej diye hain...")
+                    await asyncio.sleep(2)
+            except Exception: continue
+        
+        await status.edit(f"🏁 **Mission Successful!**\nTotal `{count}` videos forward ho gayi hain.")
 
-# 5. Command: /list (Saari links dekhne ke liye)
-@app.on_message(filters.command("list") & filters.user(Config.OWNER_ID))
-async def list_links(client, message):
-    links = collection.find({})
-    res = "📋 **Aapki Active Links:**\n\n"
-    async for link in links:
-        res += f"🔹 From: `{link['source']}` ➔ To: `{link['dest']}`\n"
-    await message.reply_text(res if "🔹" in res else "❌ Koi link nahi mili.")
+@app.on_message(filters.command("cancel") & filters.user(Config.OWNER_ID))
+async def cancel_batch(client, message):
+    if message.from_user.id in batch_data:
+        del batch_data[message.from_user.id]
+        await message.reply_text("❌ Process cancel kar diya gaya hai.")
 
-# 6. Live Forwarding Logic
-@app.on_message(filters.chat() & ~filters.command(["add", "batch", "list", "start"]))
+# --- Live Forwarding (As it is) ---
+@app.on_message(filters.chat() & ~filters.command(["start", "batch", "add", "cancel", "list"]))
 async def forwarder(client, message):
     data = await collection.find_one({"source": message.chat.id})
     if data:
-        try:
-            await message.copy(chat_id=data["dest"])
-        except:
-            pass
+        try: await message.copy(chat_id=data["dest"])
+        except: pass
 
-print("Bot is Starting...")
 app.run()
+    
