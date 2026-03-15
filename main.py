@@ -4,19 +4,43 @@ from config import Config
 
 app = Client("forwarder_bot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN)
 
-# Heroku ke Config Vars se Log Channel ID uthana
+# Heroku se Log Channel ID uthana
 LOG_CHANNEL = Config.LOG_CHANNEL 
 
 user_data = {}
 
+# 1. Sabse Mast Start Menu
 @app.on_message(filters.command("start") & filters.user(Config.OWNER_ID))
 async def start_cmd(client, message):
-    await message.reply_text("👋 **Forwarder Pro + Auto-Log Ready!**\n\nAb har forward hone wali video ki ek copy tere Log Channel mein bhi jayegi.")
+    help_text = (
+        "✨ **Forwarder Pro Bot Menu** ✨\n\n"
+        "Bhai, ye rahi teri saari commands:\n\n"
+        "🚀 `/batch` - Step-by-step videos forward karne ke liye.\n"
+        "❌ `/cancel` - Chalte huye batch ko beech mein rokne ke liye.\n"
+        "🎯 **ID Checker:** Kisi bhi channel ka message mujhe **Forward** karo, main uski ID bata dunga.\n\n"
+        "⚙️ **Status:** Bot Online hai aur Log Channel linked hai!"
+    )
+    await message.reply_text(help_text)
 
+# 2. ID Checker (Forwarded message se ID nikalne ke liye)
+@app.on_message(filters.forwarded & filters.user(Config.OWNER_ID))
+async def get_info(client, message):
+    try:
+        # Check if forward_from_chat is available
+        if message.forward_from_chat:
+            c_id = message.forward_from_chat.id
+            m_id = message.forward_from_message_id
+            await message.reply_text(f"🎯 **Data Mil Gaya!**\n\n📌 Channel ID: `{c_id}`\n📌 Message ID: `{m_id}`\n\nAb iska use `/batch` mein karo.")
+        else:
+            await message.reply_text("❌ Bhai, is message ki ID nahi nikal rahi. Shayad user ne privacy lagayi hai ya ye channel message nahi hai.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+# 3. Interactive Batch Logic
 @app.on_message(filters.command("batch") & filters.user(Config.OWNER_ID))
 async def start_batch(client, message):
     user_data[message.from_user.id] = {"step": 1}
-    await message.reply_text("📥 **Step 1:** Source aur Dest ID bhejo:\n`-100Source -100Dest` ")
+    await message.reply_text("📥 **Step 1:**\nSource aur Dest ID bhejo (Space dekar):\nExample: `-100123 -100456` ")
 
 @app.on_message(filters.user(Config.OWNER_ID) & filters.text & ~filters.command(["start", "batch", "cancel"]))
 async def handle_steps(client, message):
@@ -29,8 +53,8 @@ async def handle_steps(client, message):
             ids = message.text.split(" ")
             user_data[user_id]["source"], user_data[user_id]["dest"] = int(ids[0]), int(ids[1])
             user_data[user_id]["step"] = 2
-            await message.reply_text("🔢 **Step 2:** Message Range bhejo:\n`200 400` ")
-        except: await message.reply_text("❌ Sahi format mein IDs dalo (Space dekar).")
+            await message.reply_text("🔢 **Step 2:**\nRange bhejo (Kha se kha tak):\nExample: `200 400` ")
+        except: await message.reply_text("❌ IDs sahi format mein dalo (Example: -100123 -100456).")
 
     elif step == 2:
         try:
@@ -39,42 +63,44 @@ async def handle_steps(client, message):
             source, dest = user_data[user_id]["source"], user_data[user_id]["dest"]
             del user_data[user_id]
             
-            status = await message.reply_text("🚀 **Forwarding with Auto-Logging...**")
+            status = await message.reply_text("🚀 **Forwarding Shuru...**")
             count = 0
 
             for m_id in range(start, end + 1):
                 try:
                     msg = await client.get_messages(source, m_id)
+                    # Sirf Video ya Document hi forward honge
                     if msg and (msg.video or msg.document):
                         file_id = msg.video.file_id if msg.video else msg.document.file_id
                         cap = msg.caption if msg.caption else ""
 
-                        # 1. Target Channel mein bhejna
+                        # Target Channel mein send karna (New post feel)
                         await client.send_video(chat_id=dest, video=file_id, caption=cap)
                         
-                        # 2. Log Channel mein Copy bhejna (Heroku ID se)
+                        # Log Channel mein copy bhejna
                         if LOG_CHANNEL:
                             try:
-                                await client.send_video(
-                                    chat_id=LOG_CHANNEL, 
-                                    video=file_id, 
-                                    caption=f"📂 **Log Record**\n📌 From ID: `{m_id}`\n\n{cap}"
-                                )
+                                await client.send_video(chat_id=LOG_CHANNEL, video=file_id, caption=f"📂 Log: `{m_id}`\n\n{cap}")
                             except: pass
                         
                         count += 1
                         if count % 10 == 0:
-                            await status.edit(f"🚀 `{count}` items dono jagah bhej diye hain...")
-                        await asyncio.sleep(3) # Safe delay
+                            await status.edit(f"🚀 `{count}` items bhej diye hain...")
+                        await asyncio.sleep(3) 
                 except: continue
             
             await client.send_message(chat_id=dest, text="Done ✅")
-            if LOG_CHANNEL:
-                await client.send_message(chat_id=LOG_CHANNEL, text=f"🏁 **Batch Finished!** Total `{count}` videos logged.")
-            
-            await status.edit(f"🏁 **Kaam Ho Gaya!** Total `{count}` videos forward aur log ho gayi hain.")
+            await status.edit(f"🏁 **Batch Complete!**\nTotal `{count}` videos forward hui aur Log Channel mein copy bhi ho gayi.")
             
         except Exception as e: await message.reply_text(f"❌ Error: {e}")
 
+# 4. Cancel Command
+@app.on_message(filters.command("cancel") & filters.user(Config.OWNER_ID))
+async def cancel_process(client, message):
+    if message.from_user.id in user_data:
+        del user_data[message.from_user.id]
+        await message.reply_text("❌ Process cancel kar diya gaya hai.")
+    else:
+        await message.reply_text("Bhai, abhi koi process chal hi nahi raha.")
+
 app.run()
-                            
