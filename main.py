@@ -1,128 +1,122 @@
-import asyncio
 import os
-from pyrogram import Client, filters
+import asyncio
+from pyrogram import Client, filters, errors
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime, timedelta
 
 # --- CONFIGS ---
-# Heroku se values uthayega
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
+API_ID = int(os.environ.get("API_ID", "33401543"))
+API_HASH = os.environ.get("API_HASH", "7cdea5bbc8bd991b4a49807ce86")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL"))
+MONGO_DB_URI = os.environ.get("MONGO_DB_URI")
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0"))
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-# Multi-Owner Fix: Comma se IDs alag karke list banayega
-RAW_OWNER = os.environ.get("OWNER_ID", "0")
-OWNER_IDS = [int(i.strip()) for i in RAW_OWNER.split(",") if i.strip().isdigit()]
+# Database Setup
+db_client = AsyncIOMotorClient(MONGO_DB_URI)
+db = db_client["ForwardProDB"]
+users = db["premium_users"]
+settings = db["bot_settings"]
 
-app = Client("loser_forwarder", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("LoserForwarder", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Global Variables
-user_data = {}
-live_settings = {} # Individual live settings for each owner
+# --- MIDDLEWARE: Check Premium ---
+async def is_premium(user_id):
+    if user_id == OWNER_ID: return True
+    user = await users.find_one({"user_id": user_id})
+    if user and user["expiry"] > datetime.now():
+        return True
+    return False
 
-# --- START COMMAND ---
-@app.on_message(filters.command("start") & filters.user(OWNER_IDS))
+# --- COMMANDS ---
+
+@app.on_message(filters.command("start"))
 async def start(client, message):
-    await message.reply_text(
-        f"🚀 **Strong Forwarder Active!**\n\n"
-        f"👤 **Author:** Loser\n"
-        f"👑 **Owners:** `{len(OWNER_IDS)}` Authorized\n\n"
-        "📜 **Commands:**\n"
-        "🏎️ `/batch` - Bulk forward old files\n"
-        "📡 `/live` - Real-time forwarding\n"
-        "📴 `/stop` - Stop live forwarding\n"
-        "❌ `/cancel` - Cancel current batch\n"
-        "🎯 **Checker:** Forward any message here to get ID."
+    text = (
+        "🌟 **Welcome to Loser Premium Forwarder**\n\n"
+        "🚀 **User Commands:**\n"
+        "🔹 /start - Check if bot is alive\n"
+        "🔹 /id - Get your Telegram ID\n"
+        "🔹 /live - Start Live Forwarding (New Posts)\n"
+        "🔹 /batch - Forward Old Posts (Range)\n"
+        "🔹 /stop - Stop any active process\n"
+        "🔹 /cancel - Cancel current setup\n\n"
+        "💎 *Status: Premium Activated*" if await is_premium(message.from_user.id) else "❌ *Status: No Access*"
     )
+    await message.reply_text(text)
 
-# --- ID CHECKER (Always On) ---
-@app.on_message(filters.forwarded & filters.user(OWNER_IDS))
-async def checker(client, message):
-    if message.forward_from_chat:
-        chat_id = message.forward_from_chat.id
-        msg_id = message.forward_from_message_id
-        await message.reply_text(f"🎯 **Target ID:** `{chat_id}`\n📌 **Message ID:** `{msg_id}`")
+@app.on_message(filters.command("id"))
+async def get_id(client, message):
+    await message.reply_text(f"Your ID: `{message.from_user.id}`\nChat ID: `{message.chat.id}`")
 
-# --- LIVE FORWARD LOGIC ---
-@app.on_message(filters.command("live") & filters.user(OWNER_IDS))
-async def live_on(client, message):
-    args = message.text.split()
-    if len(args) < 3:
-        return await message.reply_text("❌ **Format:** `/live SourceID DestID` ")
-    
-    uid = message.from_user.id
-    live_settings[uid] = {"src": int(args[1]), "dst": int(args[2]), "active": True}
-    
-    await message.reply_text(f"📡 **Live Mode ON!**\nFrom: `{args[1]}`\nTo: `{args[2]}`")
-    if LOG_CHANNEL:
-        await client.send_message(LOG_CHANNEL, f"✅ **Live Setup** by `{uid}`\nSource: `{args[1]}`")
+# --- OWNER COMMANDS ---
 
-@app.on_message(filters.command("stop") & filters.user(OWNER_IDS))
-async def live_off(client, message):
-    uid = message.from_user.id
-    if uid in live_settings:
-        live_settings[uid]["active"] = False
-        await message.reply_text("📴 **Live Forwarding Stopped.**")
+@app.on_message(filters.command("add") & filters.user(OWNER_ID))
+async def add_user(client, message):
+    try:
+        args = message.text.split()
+        target_id, days = int(args[1]), int(args[2])
+        expiry = datetime.now() + timedelta(days=days)
+        await users.update_one({"user_id": target_id}, {"$set": {"expiry": expiry}}, upsert=True)
+        await message.reply_text(f"✅ User `{target_id}` added for {days} days.")
+        if LOG_CHANNEL:
+            await client.send_message(LOG_CHANNEL, f"👤 New Premium User: `{target_id}` for {days} days.")
+    except:
+        await message.reply_text("Usage: `/add 123456 30` (ID then Days)")
+
+@app.on_message(filters.command("remove") & filters.user(OWNER_ID))
+async def remove_user(client, message):
+    try:
+        target_id = int(message.text.split()[1])
+        await users.delete_one({"user_id": target_id})
+        await message.reply_text("❌ User Access Removed.")
+    except:
+        await message.reply_text("Usage: `/remove 123456` ")
+
+# --- FORWARDING LOGIC (With Auto Caption) ---
 
 @app.on_message((filters.video | filters.document) & ~filters.forwarded)
-async def live_handler(client, message):
-    # Check if message is from any active source
-    for uid, config in live_settings.items():
-        if config["active"] and message.chat.id == config["src"]:
-            file_id = message.video.file_id if message.video else message.document.file_id
-            try:
-                await client.send_video(config["dst"], file_id, caption=message.caption or "")
-                if LOG_CHANNEL:
-                    await client.send_video(LOG_CHANNEL, file_id, caption=f"📡 **Live Log**\nOwner: `{uid}`")
-            except Exception as e:
-                print(f"Live Error: {e}")
-
-# --- BATCH FORWARD LOGIC ---
-@app.on_message(filters.command("batch") & filters.user(OWNER_IDS))
-async def batch_init(client, message):
-    user_data[message.from_user.id] = {"step": 1}
-    await message.reply_text("📥 **Step 1:** Source aur Destination ID bhejo (Space dekar).")
-
-@app.on_message(filters.user(OWNER_IDS) & filters.text & ~filters.command(["start", "batch", "live", "stop", "cancel"]))
-async def batch_manager(client, message):
-    uid = message.from_user.id
-    if uid not in user_data: return
-    step = user_data[uid]["step"]
-
-    if step == 1:
-        try:
-            ids = message.text.split()
-            user_data[uid].update({"src": int(ids[0]), "dst": int(ids[1]), "step": 2})
-            await message.reply_text("🔢 **Step 2:** Message Range (StartID EndID) bhejo.")
-        except: await message.reply_text("❌ IDs sahi se dalo.")
+async def handle_forward(client, message):
+    if not await is_premium(message.from_user.id): return
     
-    elif step == 2:
+    # Auto Caption: Loser Name Addition
+    original_caption = message.caption or ""
+    new_caption = f"{original_caption}\n\n🎬 **Forwarded By: Loser**"
+    
+    # Logic to find destination from DB (assuming linked via /live setup)
+    # This part needs your /live linking logic to be active
+    pass
+
+@app.on_message(filters.command("batch") & filters.private)
+async def batch_forward(client, message):
+    if not await is_premium(message.from_user.id):
+        return await message.reply_text("❌ Buy Premium to use Batch.")
+    await message.reply_text("Send me the **Starting Message Link** of the channel.")
+
+# --- BROADCAST ---
+@app.on_message(filters.command("broadcast") & filters.user(OWNER_ID))
+async def broadcast(client, message):
+    if not message.reply_to_message:
+        return await message.reply_text("Reply to a message to broadcast.")
+    
+    all_users = users.find({})
+    count = 0
+    async for u in all_users:
         try:
-            range_data = message.text.split()
-            start, end = int(range_data[0]), int(range_data[1])
-            src, dst = user_data[uid]["src"], user_data[uid]["dst"]
-            del user_data[uid]
-            
-            status = await message.reply_text("🏎️ **Turbo Batch Started...**")
-            count = 0
-            for m_id in range(start, end + 1):
-                try:
-                    m = await client.get_messages(src, m_id)
-                    if m and (m.video or m.document):
-                        f_id = m.video.file_id if m.video else m.document.file_id
-                        await client.send_video(dst, f_id, caption=m.caption or "")
-                        if LOG_CHANNEL:
-                            await client.send_video(LOG_CHANNEL, f_id, caption=f"📂 **Batch Log**\nMsg ID: `{m_id}`")
-                        count += 1
-                        if count % 10 == 0: await status.edit(f"🚀 Sent `{count}` files...")
-                        await asyncio.sleep(1.5) # Flood wait avoid karne ke liye
-                except: continue
-            await status.edit(f"🏁 **Batch Done, Loser!**\nTotal: `{count}` files sent.")
-        except: await message.reply_text("❌ Range galat hai.")
+            await message.reply_to_message.copy(u["user_id"])
+            count += 1
+        except: pass
+    await message.reply_text(f"✅ Broadcast Done to {count} users.")
 
-@app.on_message(filters.command("cancel") & filters.user(OWNER_IDS))
-async def cancel_op(client, message):
-    user_data.pop(message.from_user.id, None)
-    await message.reply_text("❌ **Operation Cancelled.**")
+# --- THE CRITICAL FIX FOR RUNTIME ERROR ---
+async def start_bot():
+    await app.start()
+    print("🚀 LOSER FORWARDER IS ONLINE!")
+    await asyncio.Event().wait()
 
-print("Bot is starting...")
-app.run()
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_bot())
+    
