@@ -1,7 +1,6 @@
 import os
 import asyncio
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram import Client, filters, errors
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
 
@@ -13,44 +12,39 @@ MONGO_DB_URI = os.environ.get("MONGO_DB_URI")
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0"))
 OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
 
-# Database Setup
+# Database
 db_client = AsyncIOMotorClient(MONGO_DB_URI)
 db = db_client["ForwardProDB"]
 users = db["premium_users"]
 
 app = Client("LoserForwarder", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- PREMIUM CHECK ---
+# --- HELPER: Premium Check ---
 async def is_premium(user_id):
     if user_id == OWNER_ID: return True
     user = await users.find_one({"user_id": user_id})
-    if user and user["expiry"] > datetime.now():
-        return True
-    return False
+    return user and user["expiry"] > datetime.now()
 
-# --- USER COMMANDS ---
+# --- COMMANDS ---
 @app.on_message(filters.command("start"))
 async def start(client, message):
     text = (
-        "🛡️ **Welcome to Loser Premium Forwarder**\n\n"
-        "📖 **Commands List:**\n"
-        "🔹 /start - Bot status check\n"
-        "🔹 /id - Apna ID check karein\n"
-        "🔹 /live - Live forward setup\n"
-        "🔹 /batch - Purane posts forward karein\n"
-        "🔹 /stop - Process rokne ke liye\n"
-        "🔹 /cancel - Setup hatane ke liye\n\n"
-        "💎 **Premium:** " + ("Activated ✅" if await is_premium(message.from_user.id) else "Not Found ❌")
+        "🚀 **Loser Premium Forwarder Online**\n\n"
+        "🔹 /start - Help Menu\n"
+        "🔹 /id - Check ID\n"
+        "🔹 /live - Live Forward Setup\n"
+        "🔹 /batch - Batch Forwarding\n"
+        "🔹 /stop - Stop Process\n"
+        "💎 Status: " + ("Premium ✅" if await is_premium(message.from_user.id) else "Basic ❌")
     )
     await message.reply_text(text)
 
 @app.on_message(filters.command("id"))
 async def get_id(client, message):
-    await message.reply_text(f"👤 **Your ID:** `{message.from_user.id}`\n👥 **Chat ID:** `{message.chat.id}`")
+    await message.reply_text(f"Your ID: `{message.from_user.id}`\nChat ID: `{message.chat.id}`")
 
-# --- OWNER COMMANDS ---
 @app.on_message(filters.command("add") & filters.user(OWNER_ID))
-async def add_premium(client, message):
+async def add_user(client, message):
     try:
         args = message.text.split()
         u_id, days = int(args[1]), int(args[2])
@@ -58,40 +52,33 @@ async def add_premium(client, message):
         await users.update_one({"user_id": u_id}, {"$set": {"expiry": expiry}}, upsert=True)
         await message.reply_text(f"✅ User `{u_id}` added for {days} days.")
     except:
-        await message.reply_text("Usage: `/add [ID] [Days]`")
+        await message.reply_text("Usage: `/add ID Days` ")
 
-@app.on_message(filters.command("remove") & filters.user(OWNER_ID))
-async def remove_premium(client, message):
-    try:
-        u_id = int(message.text.split()[1])
-        await users.delete_one({"user_id": u_id})
-        await message.reply_text(f"❌ User `{u_id}` removed.")
-    except:
-        await message.reply_text("Usage: `/remove [ID]`")
-
-@app.on_message(filters.command("broadcast") & filters.user(OWNER_ID))
-async def broadcast(client, message):
-    if not message.reply_to_message:
-        return await message.reply_text("Reply to a message to broadcast!")
-    await message.reply_text("🚀 Broadcasting...")
-
-# --- FORWARDING + AUTO CAPTION ---
+# --- AUTO CAPTION EDIT (The Core Logic) ---
 @app.on_message((filters.video | filters.document) & ~filters.forwarded)
-async def auto_forward(client, message):
+async def auto_post(client, message):
     if not await is_premium(message.from_user.id): return
-    caption = message.caption or ""
-    new_caption = f"{caption}\n\n🎬 **Forwarded By: Loser**"
-    # Destination logic for /live goes here
-    pass
+    
+    # Auto-Caption addition
+    cap = message.caption or ""
+    new_cap = f"{cap}\n\n🎬 **Forwarded By: Loser**"
+    
+    # This is where your /live destination logic will go
+    print(f"Post detected with Loser caption: {new_cap}")
 
-# --- THE CRITICAL FIX ---
+# --- STARTUP FIX ---
 async def start_bot():
-    await app.start()
-    print("🚀 BOT IS ONLINE!")
-    await asyncio.Future()
+    try:
+        await app.start()
+        print("🚀 BOT IS LIVE!")
+        await asyncio.Future()
+    except errors.FloodWait as e:
+        print(f"⚠️ FloodWait: Waiting {e.value} seconds...")
+        await asyncio.sleep(e.value)
+        await start_bot()
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(start_bot())
-        
+    
